@@ -8,19 +8,18 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, sans-serif; background: #f1f5f9; padding: 20px; color: #1e293b; max-width: 500px; margin: 0 auto; }
-    h1 { font-size: 1.5rem; text-align: center; margin-bottom: 12px; }
+    h1 { font-size: 1.5rem; text-align: center; margin-bottom: 8px; }
     .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #e2e8f0; font-size: 0.85rem; font-weight: bold; margin-bottom: 16px; }
     .panel { background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 20px; }
     
-    /* カード一覧 */
+    input[type="text"] { width: 100%; padding: 12px; font-size: 1.1rem; border: 2px solid #cbd5e1; border-radius: 8px; margin-bottom: 12px; }
+    
     .card-list { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; }
     .card-btn { padding: 12px 16px; font-size: 1rem; border: 2px solid #cbd5e1; border-radius: 8px; background: #fff; text-align: left; cursor: pointer; transition: 0.15s; }
     .card-btn.selected { border-color: #3b82f6; background: #eff6ff; font-weight: bold; }
 
-    /* 生成された言葉プレビュー */
     .preview-box { background: #f8fafc; border: 1px dashed #94a3b8; border-radius: 8px; padding: 14px; min-height: 52px; font-size: 1.2rem; font-weight: bold; color: #2563eb; margin-bottom: 16px; word-break: break-all; }
     
-    /* アクションボタン */
     .btn { display: block; width: 100%; padding: 12px; font-size: 1rem; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; margin-top: 8px; }
     .btn-primary { background: #2563eb; color: #fff; }
     .btn-secondary { background: #64748b; color: #fff; }
@@ -33,14 +32,22 @@
 <body>
 
   <h1>単語ポーカー</h1>
-  <div style="text-align: center;"><span id="role-badge" class="badge">接続中...</span></div>
+  <div style="text-align: center;"><span id="status-badge" class="badge">部屋を決めて入室してください</span></div>
 
-  <!-- 待機画面 -->
-  <div id="wait-view" class="panel">
-    <p style="text-align: center;">対戦相手の接続を待っています (現在1/2人)...</p>
+  <!-- 1. 入室（合言葉）画面 -->
+  <div id="join-view" class="panel">
+    <h3>合言葉（部屋名）を入力</h3>
+    <p style="font-size: 0.85rem; color: #64748b; margin-bottom: 12px;">対戦相手と同じ合言葉を入力するとマッチングします。</p>
+    <input type="text" id="room-input" placeholder="例: poker777" />
+    <button class="btn btn-primary" onclick="joinRoom()">部屋に入る</button>
   </div>
 
-  <!-- ゲーム画面（手札選択） -->
+  <!-- 2. 待機画面 -->
+  <div id="wait-view" class="panel hidden">
+    <p style="text-align: center;">部屋 <strong id="current-room-text" style="color: #2563eb;"></strong> に入室しました！<br><br>対戦相手の入室を待っています...</p>
+  </div>
+
+  <!-- 3. ゲーム画面（手札選択） -->
   <div id="play-view" class="panel hidden">
     <h3>あなたの手札 (タップで選択/解除)</h3>
     <div id="hand-cards" class="card-list"></div>
@@ -51,12 +58,12 @@
     <button id="submit-btn" class="btn btn-primary" disabled onclick="submitPhrase()">この言葉で勝負！</button>
   </div>
 
-  <!-- 相手の入力待ち -->
+  <!-- 4. 相手の入力待ち -->
   <div id="waiting-opponent-view" class="panel hidden">
-    <p style="text-align: center;">言葉を送信しました！<br>対戦相手の入力を待っています...</p>
+    <p style="text-align: center;">言葉を送信しました！<br>相手の入力を待っています...</p>
   </div>
 
-  <!-- ジャッジ・判定画面 -->
+  <!-- 5. ジャッジ画面 -->
   <div id="judge-view" class="panel hidden">
     <h3 style="text-align: center; margin-bottom: 12px;">=== 言葉が揃いました ===</h3>
     <p><strong>プレイヤー1:</strong> <span id="p1-res" style="color: #2563eb; font-weight: bold;"></span></p>
@@ -69,22 +76,34 @@
       <button class="btn btn-secondary" onclick="voteJudge('0')">引き分け</button>
     </div>
 
-    <!-- 結果表示 -->
     <div id="result-box" class="hidden" style="margin-top: 20px; text-align: center;">
       <h2 id="result-text" style="color: #0f172a; margin-bottom: 12px;"></h2>
-      <button class="btn btn-primary" onclick="restartGame()">もう一度遊ぶ</button>
+      <button class="btn btn-primary" onclick="restartGame()">もう一度同じ相手と遊ぶ</button>
     </div>
   </div>
 
   <script>
     const socket = io();
+    let currentRoom = "";
     let currentRole = "";
     let selectedIndices = [];
     let myHand = [];
 
-    socket.on("assigned_role", (data) => {
+    function joinRoom() {
+      const room = document.getElementById("room-input").value.trim();
+      if (!room) {
+        alert("合言葉を入力してください");
+        return;
+      }
+      socket.emit("join_room", { room_id: room });
+    }
+
+    socket.on("joined_success", (data) => {
+      currentRoom = data.room_id;
       currentRole = data.role;
-      document.getElementById("role-badge").innerText = "あなた: " + currentRole;
+      document.getElementById("status-badge").innerText = `部屋: ${currentRoom} (${currentRole})`;
+      document.getElementById("current-room-text").innerText = currentRoom;
+      updateViews("wait-view");
     });
 
     socket.on("game_start", (data) => {
@@ -165,20 +184,20 @@
 
     function submitPhrase() {
       const words = selectedIndices.map(i => myHand[i]);
-      socket.emit("submit_phrase", { phrase: words.join("") });
+      socket.emit("submit_phrase", { room_id: currentRoom, phrase: words.join("") });
       updateViews("waiting-opponent-view");
     }
 
     function voteJudge(winner) {
-      socket.emit("send_judge", { verdict: winner });
+      socket.emit("send_judge", { room_id: currentRoom, verdict: winner });
     }
 
     function restartGame() {
-      socket.emit("restart");
+      socket.emit("restart", { room_id: currentRoom });
     }
 
     function updateViews(activeId) {
-      ["wait-view", "play-view", "waiting-opponent-view", "judge-view"].forEach(id => {
+      ["join-view", "wait-view", "play-view", "waiting-opponent-view", "judge-view"].forEach(id => {
         document.getElementById(id).classList.toggle("hidden", id !== activeId);
       });
     }
