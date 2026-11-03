@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>単語ポーカー オンライン</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, sans-serif; background: #f1f5f9; padding: 20px; color: #1e293b; max-width: 500px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; text-align: center; margin-bottom: 12px; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #e2e8f0; font-size: 0.85rem; font-weight: bold; margin-bottom: 16px; }
+    .panel { background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    
+    /* カード一覧 */
+    .card-list { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; }
+    .card-btn { padding: 12px 16px; font-size: 1rem; border: 2px solid #cbd5e1; border-radius: 8px; background: #fff; text-align: left; cursor: pointer; transition: 0.15s; }
+    .card-btn.selected { border-color: #3b82f6; background: #eff6ff; font-weight: bold; }
+
+    /* 生成された言葉プレビュー */
+    .preview-box { background: #f8fafc; border: 1px dashed #94a3b8; border-radius: 8px; padding: 14px; min-height: 52px; font-size: 1.2rem; font-weight: bold; color: #2563eb; margin-bottom: 16px; word-break: break-all; }
+    
+    /* アクションボタン */
+    .btn { display: block; width: 100%; padding: 12px; font-size: 1rem; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; margin-top: 8px; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-secondary { background: #64748b; color: #fff; }
+    .btn-danger { background: #ef4444; color: #fff; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+
+  <h1>単語ポーカー</h1>
+  <div style="text-align: center;"><span id="role-badge" class="badge">接続中...</span></div>
+
+  <!-- 待機画面 -->
+  <div id="wait-view" class="panel">
+    <p style="text-align: center;">対戦相手の接続を待っています (現在1/2人)...</p>
+  </div>
+
+  <!-- ゲーム画面（手札選択） -->
+  <div id="play-view" class="panel hidden">
+    <h3>あなたの手札 (タップで選択/解除)</h3>
+    <div id="hand-cards" class="card-list"></div>
+
+    <h3>完成する言葉:</h3>
+    <div id="phrase-preview" class="preview-box">（カードを選んでください）</div>
+
+    <button id="submit-btn" class="btn btn-primary" disabled onclick="submitPhrase()">この言葉で勝負！</button>
+  </div>
+
+  <!-- 相手の入力待ち -->
+  <div id="waiting-opponent-view" class="panel hidden">
+    <p style="text-align: center;">言葉を送信しました！<br>対戦相手の入力を待っています...</p>
+  </div>
+
+  <!-- ジャッジ・判定画面 -->
+  <div id="judge-view" class="panel hidden">
+    <h3 style="text-align: center; margin-bottom: 12px;">=== 言葉が揃いました ===</h3>
+    <p><strong>プレイヤー1:</strong> <span id="p1-res" style="color: #2563eb; font-weight: bold;"></span></p>
+    <p style="margin-top: 8px;"><strong>プレイヤー2:</strong> <span id="p2-res" style="color: #e11d48; font-weight: bold;"></span></p>
+    
+    <div id="judge-actions" style="margin-top: 20px;">
+      <p style="font-size: 0.9rem; color: #64748b; margin-bottom: 8px;">勝者を選んでください (誰でも投票可能):</p>
+      <button class="btn btn-primary" onclick="voteJudge('1')">プレイヤー1の勝ち</button>
+      <button class="btn btn-danger" onclick="voteJudge('2')">プレイヤー2の勝ち</button>
+      <button class="btn btn-secondary" onclick="voteJudge('0')">引き分け</button>
+    </div>
+
+    <!-- 結果表示 -->
+    <div id="result-box" class="hidden" style="margin-top: 20px; text-align: center;">
+      <h2 id="result-text" style="color: #0f172a; margin-bottom: 12px;"></h2>
+      <button class="btn btn-primary" onclick="restartGame()">もう一度遊ぶ</button>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    let currentRole = "";
+    let selectedIndices = [];
+    let myHand = [];
+
+    socket.on("assigned_role", (data) => {
+      currentRole = data.role;
+      document.getElementById("role-badge").innerText = "あなた: " + currentRole;
+    });
+
+    socket.on("game_start", (data) => {
+      myHand = data.hand;
+      selectedIndices = [];
+      updateViews("play-view");
+      renderHand();
+      updatePreview();
+    });
+
+    socket.on("judge_phase", (data) => {
+      document.getElementById("p1-res").innerText = data.p1_phrase;
+      document.getElementById("p2-res").innerText = data.p2_phrase;
+      document.getElementById("judge-actions").classList.remove("hidden");
+      document.getElementById("result-box").classList.add("hidden");
+      updateViews("judge-view");
+    });
+
+    socket.on("game_result", (data) => {
+      document.getElementById("judge-actions").classList.add("hidden");
+      const resBox = document.getElementById("result-box");
+      resBox.classList.remove("hidden");
+      
+      const winner = data.winner;
+      const textEl = document.getElementById("result-text");
+      if (winner === "1") textEl.innerText = "勝者: プレイヤー1 🎉";
+      else if (winner === "2") textEl.innerText = "勝者: プレイヤー2 🎉";
+      else textEl.innerText = "結果: 引き分け 🤝";
+    });
+
+    socket.on("reset_game", (data) => {
+      alert(data.message);
+      updateViews("wait-view");
+    });
+
+    function renderHand() {
+      const container = document.getElementById("hand-cards");
+      container.innerHTML = "";
+      myHand.forEach((word, idx) => {
+        const btn = document.createElement("button");
+        btn.className = "card-btn";
+        btn.innerText = (idx + 1) + ". " + word;
+        btn.onclick = () => toggleSelect(idx);
+        container.appendChild(btn);
+      });
+    }
+
+    function toggleSelect(idx) {
+      const pos = selectedIndices.indexOf(idx);
+      if (pos > -1) {
+        selectedIndices.splice(pos, 1);
+      } else {
+        selectedIndices.push(idx);
+      }
+      
+      const btns = document.querySelectorAll(".card-btn");
+      btns.forEach((btn, i) => {
+        btn.classList.toggle("selected", selectedIndices.includes(i));
+      });
+
+      updatePreview();
+    }
+
+    function updatePreview() {
+      const words = selectedIndices.map(i => myHand[i]);
+      const phrase = words.join("");
+      const preview = document.getElementById("phrase-preview");
+      const submitBtn = document.getElementById("submit-btn");
+
+      if (words.length > 0) {
+        preview.innerText = phrase;
+        submitBtn.disabled = false;
+      } else {
+        preview.innerText = "（カードを選んでください）";
+        submitBtn.disabled = true;
+      }
+    }
+
+    function submitPhrase() {
+      const words = selectedIndices.map(i => myHand[i]);
+      socket.emit("submit_phrase", { phrase: words.join("") });
+      updateViews("waiting-opponent-view");
+    }
+
+    function voteJudge(winner) {
+      socket.emit("send_judge", { verdict: winner });
+    }
+
+    function restartGame() {
+      socket.emit("restart");
+    }
+
+    function updateViews(activeId) {
+      ["wait-view", "play-view", "waiting-opponent-view", "judge-view"].forEach(id => {
+        document.getElementById(id).classList.toggle("hidden", id !== activeId);
+      });
+    }
+  </script>
+</body>
+</html>
