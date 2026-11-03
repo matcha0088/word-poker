@@ -1,12 +1,11 @@
 import random
 from flask import Flask, render_template, request
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret_word_poker_key'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# 単語デッキ
 DECK = [
     "空", "海", "星", "風", "森", "山", "花", "時", "愛の", "ハンドクリーム",
     "夜", "朝の", "光", "闇の", "雪", "炎の", "雨", "虹", "音", "心", "鉄の",
@@ -48,73 +47,86 @@ DECK = [
     "年金", "年金暮らしの", "Gの", "アク", "スタ", "メ", "で滅", "SEIKINおすすめの"
 ]
 
-# ルーム・進行管理
-game_state = {
-    "players": {},       # {sid: {"role": "プレイヤー1" or "プレイヤー2", "phrase": ""}}
-    "deck": [],
-    "status": "waiting"  # "waiting", "playing", "judging", "finished"
-}
+# ルームごとの状態管理: {room_id: {"players": {sid: {...}}, "status": "..."}}
+rooms = {}
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-@socketio.on("connect")
-def handle_connect():
+@socketio.on("join_room")
+def handle_join_room(data):
     sid = request.sid
-    # 最大2人まで対戦プレイヤーとして登録
-    if len(game_state["players"]) == 0:
-        game_state["players"][sid] = {"role": "プレイヤー1", "phrase": ""}
-        emit("assigned_role", {"role": "プレイヤー1"})
-    elif len(game_state["players"]) == 1:
-        game_state["players"][sid] = {"role": "プレイヤー2", "phrase": ""}
-        emit("assigned_role", {"role": "プレイヤー2"})
-        # 2人揃ったらゲーム開始
-        start_game()
+    room_id = data.get("room_id", "").strip()
+    if not room_id:
+        emit("error_msg", {"message": "部屋名を入力してください。"})
+        return
+
+    # ルームが存在しなければ新規作成
+    if room_id not in rooms:
+        rooms[room_id] = {"players": {}, "status": "waiting"}
+
+    room = rooms[room_id]
+    join_room(room_id)
+
+    # プレイヤーの割り当て（先着2名、3人目以降は観戦）
+    if len(room["players"]) == 0:
+        room["players"][sid] = {"role": "プレイヤー1", "phrase": ""}
+        emit("joined_success", {"room_id": room_id, "role": "プレイヤー1"})
+    elif len(room["players"]) == 1:
+        room["players"][sid] = {"role": "プレイヤー2", "phrase": ""}
+        emit("joined_success", {"room_id": room_id, "role": "プレイヤー2"})
+        # 2人揃ったら対戦スタート
+        start_game(room_id)
     else:
-        # 3人目以降は観戦／ジャッジ枠
-        emit("assigned_role", {"role": "観戦・ジャッジ"})
-        if game_state["status"] == "judging":
-            emit("judge_phase", get_phrases())
+        emit("joined_success", {"room_id": room_id, "role": "観戦・ジャッジ"})
+        if room["status"] == "judging":
+            emit("judge_phase", get_phrases(room_id))
 
 @socketio.on("disconnect")
 def handle_disconnect():
     sid = request.sid
-    if sid in game_state["players"]:
-        del game_state["players"][sid]
-        game_state["status"] = "waiting"
-        socketio.emit("reset_game", {"message": "対戦相手が退出しました。再接続を待機します。"})
+    for room_id, room in list(rooms.items()):
+        if sid in room["players"]:
+            del room["players"][sid]
+            room["status"] = "waiting"
+            socketio.emit("reset_game", {"message": "対戦相手が退出しました。"}, to=room_id)
+            if len(room["players"]) == 0:
+                del rooms[room_id]
+            break
 
-def start_game():
-    game_state["status"] = "playing"
+def start_game(room_id):
+    room = rooms[room_id]
+    room["status"] = "playing"
     deck = DECK.copy()
     random.shuffle(deck)
-    
-    # 2人にそれぞれ5枚ずつ配る
-    player_sids = list(game_state["players"].keys())
+
+    player_sids = list(room["players"].keys())
     hands = {
         player_sids[0]: deck[0:5],
         player_sids[1]: deck[5:10]
     }
-    
+
     for sid in player_sids:
-        game_state["players"][sid]["phrase"] = ""
+        room["players"][sid]["phrase"] = ""
         socketio.emit("game_start", {"hand": hands[sid]}, to=sid)
 
 @socketio.on("submit_phrase")
 def handle_submit(data):
     sid = request.sid
-    if sid in game_state["players"]:
-        game_state["players"][sid]["phrase"] = data.get("phrase", "")
-        
-        # 2人とも入力完了したか判定
-        phrases = [p["phrase"] for p in game_state["players"].values()]
-        if all(phrases):
-            game_state["status"] = "judging"
-            socketio.emit("judge_phase", get_phrases())
+    room_id = data.get("room_id")
+    if room_id in rooms and sid in rooms[room_id]["players"]:
+        room = rooms[room_id]
+        room["players"][sid]["phrase"] = data.get("phrase", "")
 
-def get_phrases():
-    p_data = list(game_state["players"].values())
+        phrases = [p["phrase"] for p in room["players"].values()]
+        if len(phrases) == 2 and all(phrases):
+            room["status"] = "judging"
+            socketio.emit("judge_phase", get_phrases(room_id), to=room_id)
+
+def get_phrases(room_id):
+    room = rooms[room_id]
+    p_data = list(room["players"].values())
     return {
         "p1_phrase": p_data[0]["phrase"],
         "p2_phrase": p_data[1]["phrase"]
@@ -122,14 +134,17 @@ def get_phrases():
 
 @socketio.on("send_judge")
 def handle_judge(data):
+    room_id = data.get("room_id")
     verdict = data.get("verdict")
-    game_state["status"] = "finished"
-    socketio.emit("game_result", {"winner": verdict, **get_phrases()})
+    if room_id in rooms:
+        rooms[room_id]["status"] = "finished"
+        socketio.emit("game_result", {"winner": verdict, **get_phrases(room_id)}, to=room_id)
 
 @socketio.on("restart")
-def handle_restart():
-    if len(game_state["players"]) == 2:
-        start_game()
+def handle_restart(data):
+    room_id = data.get("room_id")
+    if room_id in rooms and len(rooms[room_id]["players"]) == 2:
+        start_game(room_id)
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000)
